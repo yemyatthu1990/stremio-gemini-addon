@@ -133,11 +133,34 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
     // Handle Search (Global fallback or attached to gemini_time_context)
     if (extra && extra.search) {
+        const query = extra.search.toLowerCase();
+
+        // Define triggers
+        const movieKeywords = ['movie', 'film', 'cinema'];
+        const seriesKeywords = ['series', 'show', 'tv', 'season', 'episode'];
+
+        // Check intent
+        const wantsMovies = movieKeywords.some(w => query.includes(w));
+        const wantsSeries = seriesKeywords.some(w => query.includes(w));
+
+        // LOGIC: Explicit Exclusion
+        // If I want movies ONLY, and this request is for series -> BLOCK IT
+        if (wantsMovies && !wantsSeries && type === 'series') {
+            console.log(`[OPTIMIZATION] Skipping Series request for movie-focused query: "${extra.search}"`);
+            return { metas: [] };
+        }
+
+        // If I want series ONLY, and this request is for movies -> BLOCK IT
+        if (wantsSeries && !wantsMovies && type === 'movie') {
+            console.log(`[OPTIMIZATION] Skipping Movie request for series-focused query: "${extra.search}"`);
+            return { metas: [] };
+        }
+
         // Universal search logic
         console.log(`Processing search query: ${extra.search} for type: ${type}`);
 
         const prompt = `${SYSTEM_INSTRUCTION} 
-        Analyze the semantic intent of this query: '${extra.search}'. 
+        The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
         If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
         If it is a plot description, find the closest matches. 
         Return 10 ${itemLabel}.
@@ -151,7 +174,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     let prompt = '';
 
     switch (id) {
-        case 'gemini_time_context':
+        case 'gemini_time_context_movie':
             const hour = new Date().getHours();
             let context = '';
 
@@ -170,12 +193,12 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
         case 'gemini_reddit_trending':
             if (type === 'movie') {
-                 prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/movies and r/TrueFilm. 
+                prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/movies and r/TrueFilm. 
                 Identify 10 movies that have high engagement, 'Weekly Discussion' activity, or are frequently recommended. 
                 Mix current hits with one 'Hidden Gem'.
                 Return a strictly valid JSON array of objects with "title" and "year".`;
             } else {
-                 prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/television. 
+                prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/television. 
                 Identify 10 TV shows that have high engagement, 'Weekly Discussion' activity, or are frequently recommended. 
                 Mix current hits with one 'Hidden Gem'.
                 Return a strictly valid JSON array of objects with "title" and "year".`;
@@ -190,7 +213,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
             } else {
                 genres = ['Miniseries', 'Korean Drama', 'Sitcoms', 'Space Opera', 'Dystopian', 'Procedural Dramas', 'Mockumentaries'];
             }
-            
+
             const genre = genres[Math.floor(Math.random() * genres.length)];
             console.log(`[SURPRISE] Selected Genre: ${genre}`);
 
