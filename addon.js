@@ -174,7 +174,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     let prompt = '';
 
     switch (id) {
-        case 'gemini_time_context_movie':
+        case 'gemini_time_context':
             const hour = new Date().getHours();
             let context = '';
 
