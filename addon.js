@@ -23,22 +23,43 @@ const manifest = {
     types: ['movie', 'series'],
     resources: ['catalog', 'meta'],
     catalogs: [
+        // Time Context
         {
             type: 'movie',
             id: 'gemini_time_context',
-            name: 'Gemini: Day & Night',
+            name: 'Gemini Movies: Day & Night',
             extra: [{ name: 'search', isRequired: false }]
         },
         {
             type: 'series',
+            id: 'gemini_time_context',
+            name: 'Gemini Series: Day & Night',
+            extra: [{ name: 'search', isRequired: false }]
+        },
+        // Reddit Trending
+        {
+            type: 'series',
             id: 'gemini_reddit_trending',
-            name: 'Reddit Favorites',
+            name: 'Reddit Favorites: Series',
             extra: []
         },
         {
             type: 'movie',
+            id: 'gemini_reddit_trending',
+            name: 'Reddit Favorites: Movies',
+            extra: []
+        },
+        // Surprise
+        {
+            type: 'movie',
             id: 'gemini_surprise',
-            name: 'Gemini: Surprise Me',
+            name: 'Surprise Movies',
+            extra: []
+        },
+        {
+            type: 'series',
+            id: 'gemini_surprise',
+            name: 'Surprise Series',
             extra: []
         }
     ]
@@ -107,17 +128,19 @@ async function getTmdbItem(title, year, type) {
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     console.log(`[CATALOG] Request:`, { type, id, extra });
 
+    // Define helper label
+    const itemLabel = type === 'movie' ? 'movies' : 'TV shows';
+
     // Handle Search (Global fallback or attached to gemini_time_context)
     if (extra && extra.search) {
         // Universal search logic
-        const itemType = type === 'movie' ? 'movie' : 'TV show';
         console.log(`Processing search query: ${extra.search} for type: ${type}`);
 
         const prompt = `${SYSTEM_INSTRUCTION} 
         Analyze the semantic intent of this query: '${extra.search}'. 
-        If it is a mood (e.g., 'sad sci-fi'), find ${itemType}s that match the atmosphere. 
+        If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
         If it is a plot description, find the closest matches. 
-        Return 10 ${itemType} items.
+        Return 10 ${itemLabel}.
         Return a strictly valid JSON array of objects with "title" and "year".
         Example: [{"title": "Interstellar", "year": "2014"}]`;
 
@@ -133,11 +156,11 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
             let context = '';
 
             if (hour < 12) {
-                context = "It is morning. Focus on 'Brain Food' or 'High Energy'. Genres: Documentaries, Animation, Screwball Comedy. Suggest 10 movies.";
+                context = `It is morning. Focus on 'Brain Food' or 'High Energy'. Genres: energetic animated ${itemLabel} or sitcoms/documentaries. Suggest 10 ${itemLabel}.`;
             } else if (hour < 18) {
-                context = "It is afternoon. Focus on 'Escapism'. Genres: Blockbuster Action, Fantasy, Adventure. Suggest 10 movies.";
+                context = `It is afternoon. Focus on 'Escapism'. Genres: adventure or comedy ${itemLabel}. Suggest 10 ${itemLabel}.`;
             } else {
-                context = "It is evening/night. Focus on 'Immersion' or 'Tension'. Genres: Psychological Thriller, Neo-Noir, Complex Drama. Suggest 10 movies.";
+                context = `It is evening/night. Focus on 'Immersion' or 'Tension'. Genres: thriller, horror, or complex drama ${itemLabel}. Suggest 10 ${itemLabel}.`;
             }
 
             console.log(`[TIME] Hour: ${hour} -> Context: ${context}`);
@@ -146,21 +169,32 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
             break;
 
         case 'gemini_reddit_trending':
-            // Series only
-            prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/television. 
-            Identify 10 series that have high engagement, 'Weekly Discussion' activity, or are frequently recommended in 'What to watch' threads. 
-            Mix current hits with one 'Hidden Gem'.
-            Return a strictly valid JSON array of objects with "title" and "year".`;
+            if (type === 'movie') {
+                 prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/movies and r/TrueFilm. 
+                Identify 10 movies that have high engagement, 'Weekly Discussion' activity, or are frequently recommended. 
+                Mix current hits with one 'Hidden Gem'.
+                Return a strictly valid JSON array of objects with "title" and "year".`;
+            } else {
+                 prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/television. 
+                Identify 10 TV shows that have high engagement, 'Weekly Discussion' activity, or are frequently recommended. 
+                Mix current hits with one 'Hidden Gem'.
+                Return a strictly valid JSON array of objects with "title" and "year".`;
+            }
             break;
 
         case 'gemini_surprise':
             // Random Niche Genre
-            const genres = ['Cyberpunk', '80s Slashers', 'Space Opera', 'Whodunit', 'Dystopian', 'Spaghetti Western', 'Cosmic Horror', 'French New Wave'];
+            let genres = [];
+            if (type === 'movie') {
+                genres = ['Cyberpunk', '80s Slashers', 'Space Opera', 'Whodunit', 'Dystopian', 'Spaghetti Western', 'Cosmic Horror', 'French New Wave'];
+            } else {
+                genres = ['Miniseries', 'Korean Drama', 'Sitcoms', 'Space Opera', 'Dystopian', 'Procedural Dramas', 'Mockumentaries'];
+            }
+            
             const genre = genres[Math.floor(Math.random() * genres.length)];
             console.log(`[SURPRISE] Selected Genre: ${genre}`);
 
-            prompt = `${SYSTEM_INSTRUCTION} Curate the definitive 'Starter Pack' for the sub-genre '${genre}'. 
-            Choose 10 movies that define the tropes of this genre.
+            prompt = `${SYSTEM_INSTRUCTION} Recommend 10 distinct ${itemLabel} for the sub-genre '${genre}'.
             Return a strictly valid JSON array of objects with "title" and "year".`;
             break;
 
