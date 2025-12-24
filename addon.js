@@ -11,10 +11,13 @@ const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
 // 2. Initialize TMDB
 const tmdb = new MovieDb(process.env.TMDB_API_KEY || '');
 
+// SYSTEM INSTRUCTION
+const SYSTEM_INSTRUCTION = "You are a sophisticated movie critic and database expert. You MUST return valid, raw JSON without Markdown formatting (no ```json blocks). Never explain your choices, just return data.";
+
 // 3. Define Manifest
 const manifest = {
     id: 'com.gemini.smart.search',
-    version: '1.2.0',
+    version: '1.2.1',
     name: 'Gemini AI Search',
     description: "Multi-context AI recommendations: Time of day, Reddit hits, and Random surprises.",
     types: ['movie', 'series'],
@@ -46,7 +49,7 @@ const builder = new addonBuilder(manifest);
 // 4. Helper to parse Gemini JSON output
 function parseGeminiResponse(text) {
     try {
-        let cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        let cleanedText = text.replace(/```json/g, '').replace(/```/g, '').replace(/\n/g, '').trim();
         return JSON.parse(cleanedText);
     } catch (e) {
         console.error("Failed to parse Gemini response:", text);
@@ -110,9 +113,13 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
         const itemType = type === 'movie' ? 'movie' : 'TV show';
         console.log(`Processing search query: ${extra.search} for type: ${type}`);
 
-        const prompt = `You are a video metadata intelligence. Recommend 5 ${itemType} titles that match: "${extra.search}".
+        const prompt = `${SYSTEM_INSTRUCTION} 
+        Analyze the semantic intent of this query: '${extra.search}'. 
+        If it is a mood (e.g., 'sad sci-fi'), find ${itemType}s that match the atmosphere. 
+        If it is a plot description, find the closest matches. 
+        Return 10 ${itemType} items.
         Return a strictly valid JSON array of objects with "title" and "year".
-        Example: [{"title": "${type === 'movie' ? 'Interstellar' : 'Dark'}", "year": "${type === 'movie' ? '2014' : '2017'}"}]`;
+        Example: [{"title": "Interstellar", "year": "2014"}]`;
 
         return await handleGeminiRequest(prompt, type);
     }
@@ -126,22 +133,23 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
             let context = '';
 
             if (hour < 12) {
-                context = "It is morning. Suggest 5 energetic animated movies or uplifting documentaries suitable for starting the day.";
+                context = "It is morning. Focus on 'Brain Food' or 'High Energy'. Genres: Documentaries, Animation, Screwball Comedy. Suggest 10 movies.";
             } else if (hour < 18) {
-                context = "It is afternoon. Suggest 5 adventure or comedy movies to keep the energy up.";
+                context = "It is afternoon. Focus on 'Escapism'. Genres: Blockbuster Action, Fantasy, Adventure. Suggest 10 movies.";
             } else {
-                context = "It is evening/night. Suggest 5 thriller, horror, or dark drama movies.";
+                context = "It is evening/night. Focus on 'Immersion' or 'Tension'. Genres: Psychological Thriller, Neo-Noir, Complex Drama. Suggest 10 movies.";
             }
 
             console.log(`[TIME] Hour: ${hour} -> Context: ${context}`);
-            prompt = `You are a smart assistant. The current time is ${hour}:00. ${context}
+            prompt = `${SYSTEM_INSTRUCTION} The current time is ${hour}:00. ${context}
             Return a strictly valid JSON array of objects with "title" and "year".`;
             break;
 
         case 'gemini_reddit_trending':
             // Series only
-            prompt = `Identify 5 TV series that are currently trending or are cult classics on the subreddit r/television. 
-            Focus on high-engagement discussions.
+            prompt = `${SYSTEM_INSTRUCTION} Act as a data analyst for r/television. 
+            Identify 10 series that have high engagement, 'Weekly Discussion' activity, or are frequently recommended in 'What to watch' threads. 
+            Mix current hits with one 'Hidden Gem'.
             Return a strictly valid JSON array of objects with "title" and "year".`;
             break;
 
@@ -151,7 +159,8 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
             const genre = genres[Math.floor(Math.random() * genres.length)];
             console.log(`[SURPRISE] Selected Genre: ${genre}`);
 
-            prompt = `Recommend 5 distinct movies for the specific sub-genre: ${genre}.
+            prompt = `${SYSTEM_INSTRUCTION} Curate the definitive 'Starter Pack' for the sub-genre '${genre}'. 
+            Choose 10 movies that define the tropes of this genre.
             Return a strictly valid JSON array of objects with "title" and "year".`;
             break;
 
@@ -208,18 +217,15 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
     if ((type === 'movie' || type === 'series') && id.startsWith('tt')) {
         const itemType = type === 'movie' ? 'movie' : 'TV show';
-        const prompt = `Provide detailed metadata for the ${itemType} with IMDB ID '${id}'. 
-        Return strictly valid JSON with:
-        - "meta": {
-            "id": "${id}",
-            "type": "${type}",
-            "name": "${itemType} Title",
-            "description": "Full plot summary.",
-            "releaseInfo": "Year",
-            "cast": ["Actor 1", "Actor 2"],
-            "background": "URL to a background image (optional)"
-        }
-        Do not include any extra text.`;
+        const prompt = `${SYSTEM_INSTRUCTION} You are an API. I will give you an IMDB ID '${id}'. 
+        Return a JSON object with: 
+        - 'name'
+        - 'description' (3 sentences max)
+        - 'cast' (top 3 names)
+        - 'rating' (approximate 1-10 score)
+        If you do not strictly recognize the ID, return { 'error': 'Unknown ID' }.
+        
+        Return strictly valid JSON. Do not include any extra text.`;
 
         try {
             const result = await model.generateContent(prompt);
@@ -227,13 +233,23 @@ builder.defineMetaHandler(async ({ type, id }) => {
             const text = response.text();
             const parsed = parseGeminiResponse(text);
 
-            if (parsed && parsed.meta) {
-                parsed.meta.type = type;
-                return { meta: parsed.meta };
+            if (parsed && !parsed.error) {
+                // Format for Stremio
+                return {
+                    meta: {
+                        id: id,
+                        type: type,
+                        name: parsed.name,
+                        description: parsed.description,
+                        cast: parsed.cast,
+                        imdbRating: parsed.rating
+                    }
+                };
             } else {
                 return { meta: { id, type, name: 'Details not available' } };
             }
         } catch (error) {
+            console.error("Meta error", error);
             return { meta: { id, type, name: 'Error' } };
         }
     }
