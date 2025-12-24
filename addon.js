@@ -81,9 +81,16 @@ function parseGeminiResponse(text) {
 // 5. Helper function for TMDB Search
 async function getTmdbItem(title, year, type) {
     try {
+        console.log(`[TMDB] Looking up '${title}' (Year: ${year}) Type: ${type}`);
+
         if (type === 'movie') {
-            const searchRes = await tmdb.searchMovie({ query: title, year: year });
-            if (!searchRes.results || searchRes.results.length === 0) return null;
+            const safeYear = year ? year.toString().substring(0, 4) : undefined;
+            const searchRes = await tmdb.searchMovie({ query: title, year: safeYear });
+
+            if (!searchRes.results || searchRes.results.length === 0) {
+                console.log(`[TMDB] No results found for '${title}'`);
+                return null;
+            }
 
             const item = searchRes.results[0];
             const externalIds = await tmdb.movieExternalIds({ id: item.id });
@@ -100,8 +107,13 @@ async function getTmdbItem(title, year, type) {
                 tmdbId: item.id
             };
         } else {
-            const searchRes = await tmdb.searchTv({ query: title, first_air_date_year: year });
-            if (!searchRes.results || searchRes.results.length === 0) return null;
+            // RELAXED SEARCH: Do NOT filter by year for Series (AI often gets ranges wrong)
+            const searchRes = await tmdb.searchTv({ query: title });
+
+            if (!searchRes.results || searchRes.results.length === 0) {
+                console.log(`[TMDB] No results found for '${title}'`);
+                return null;
+            }
 
             const item = searchRes.results[0];
             const externalIds = await tmdb.tvExternalIds({ id: item.id });
