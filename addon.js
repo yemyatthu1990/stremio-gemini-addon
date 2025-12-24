@@ -26,13 +26,13 @@ const manifest = {
         // Search
         {
             type: 'movie',
-            id: 'gemini_search_movie',
+            id: 'gemini_search',
             name: 'Gemini Movies: Search',
             extra: [{ name: 'search', isRequired: true }]
         },
         {
             type: 'series',
-            id: 'gemini_search_series',
+            id: 'gemini_search',
             name: 'Gemini Series: Search',
             extra: [{ name: 'search', isRequired: true }]
         },
@@ -156,62 +156,49 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     // Define helper label
     const itemLabel = type === 'movie' ? 'movies' : 'TV shows';
 
+    // Global Search Handler (Handles any catalog call with extra.search)
+    if (extra && extra.search) {
+        const query = extra.search.toLowerCase();
+
+        // Define triggers
+        const movieKeywords = ['movie', 'film', 'cinema'];
+        const seriesKeywords = ['series', 'show', 'tv', 'season', 'episode'];
+
+        // Check intent
+        const wantsMovies = movieKeywords.some(w => query.includes(w));
+        const wantsSeries = seriesKeywords.some(w => query.includes(w));
+
+        // LOGIC: Explicit Exclusion
+        // If I want movies ONLY, and this request is for series -> BLOCK IT
+        if (wantsMovies && !wantsSeries && type === 'series') {
+            console.log(`[OPTIMIZATION] Skipping Series request for movie-focused query: "${extra.search}"`);
+            return { metas: [] };
+        }
+
+        // If I want series ONLY, and this request is for movies -> BLOCK IT
+        if (wantsSeries && !wantsMovies && type === 'movie') {
+            console.log(`[OPTIMIZATION] Skipping Movie request for series-focused query: "${extra.search}"`);
+            return { metas: [] };
+        }
+
+        // Universal search logic
+        console.log(`Processing search query: ${extra.search} for type: ${type}`);
+
+        const prompt = `${SYSTEM_INSTRUCTION} 
+        The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
+        If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
+        If it is a plot description, find the closest matches. 
+        Return 10 ${itemLabel}.
+        Return a strictly valid JSON array of objects with "title" and "year".
+        Example: [{"title": "Interstellar", "year": "2014"}]`;
+
+        return await handleGeminiRequest(prompt, type);
+    }
+
     // Dynamic Catalog Logic
     let prompt = '';
-    const query = extra.search.toLowerCase();
-
-    // Define triggers
-    const movieKeywords = ['movie', 'film', 'cinema'];
-    const seriesKeywords = ['series', 'show', 'tv', 'season', 'episode'];
-
-    // Check intent
-    const wantsMovies = movieKeywords.some(w => query.includes(w));
-    const wantsSeries = seriesKeywords.some(w => query.includes(w));
 
     switch (id) {
-        case 'gemini_search_movie':
-
-
-            // If I want series ONLY, and this request is for movies -> BLOCK IT
-            if (wantsSeries && !wantsMovies && type === 'movie') {
-                console.log(`[OPTIMIZATION] Skipping Movie request for series-focused query: "${extra.search}"`);
-                return { metas: [] };
-            }
-
-            // Universal search logic
-            console.log(`Processing search query: ${extra.search} for type: ${type}`);
-
-            prompt = `${SYSTEM_INSTRUCTION} 
-            The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
-            If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
-            If it is a plot description, find the closest matches. 
-            Return 10 ${itemLabel}.
-            Return a strictly valid JSON array of objects with "title" and "year".
-            Example: [{"title": "Interstellar", "year": "2014"}]`;
-
-            return await handleGeminiRequest(prompt, type);
-
-        case 'gemini_search_series':
-
-            // If I want movies ONLY, and this request is for series -> BLOCK IT
-            if (wantsMovies && !wantsSeries && type === 'movie') {
-                console.log(`[OPTIMIZATION] Skipping Series request for movie-focused query: "${extra.search}"`);
-                return { metas: [] };
-            }
-
-            // Universal search logic
-            console.log(`Processing search query: ${extra.search} for type: ${type}`);
-
-            prompt = `${SYSTEM_INSTRUCTION} 
-            The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
-            If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
-            If it is a plot description, find the closest matches. 
-            Return 10 ${itemLabel}.
-            Return a strictly valid JSON array of objects with "title" and "year".
-            Example: [{"title": "Interstellar", "year": "2014"}]`;
-
-            return await handleGeminiRequest(prompt, type);
-
         case 'gemini_time_context':
             const hour = new Date().getHours();
             let context = '';
