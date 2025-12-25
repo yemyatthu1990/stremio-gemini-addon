@@ -101,7 +101,7 @@ function makeAddon(config) {
         ],
         behaviorHints: {
             configurable: true,
-            configurationRequired: true
+            configurationRequired: !tmdbKey || apiKeys.length === 0
         }
     };
 
