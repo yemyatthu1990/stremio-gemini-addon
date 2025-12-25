@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -15,6 +16,7 @@
             height: 100vh;
             margin: 0;
         }
+
         .container {
             background-color: #1e1e1e;
             padding: 2rem;
@@ -23,16 +25,19 @@
             width: 100%;
             max-width: 400px;
         }
+
         h1 {
             text-align: center;
             margin-bottom: 2rem;
             color: #a688fa;
         }
+
         label {
             display: block;
             margin-bottom: 0.5rem;
             font-weight: bold;
         }
+
         input {
             width: 100%;
             padding: 0.75rem;
@@ -43,10 +48,12 @@
             color: #fff;
             box-sizing: border-box;
         }
+
         input:focus {
             outline: none;
             border-color: #a688fa;
         }
+
         button {
             width: 100%;
             padding: 1rem;
@@ -59,9 +66,11 @@
             cursor: pointer;
             transition: background-color 0.2s;
         }
+
         button:hover {
             background-color: #8a63e8;
         }
+
         .note {
             font-size: 0.8rem;
             color: #888;
@@ -70,6 +79,7 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <h1>Gemini Addon Setup</h1>
@@ -92,37 +102,45 @@
     </div>
 
     <script>
-        document.getElementById('configForm').addEventListener('submit', function(e) {
+        document.getElementById('configForm').addEventListener('submit', function (e) {
             e.preventDefault();
 
+            // 1. Gather Data
             const tmdb = document.getElementById('tmdb').value.trim();
             const gemini1 = document.getElementById('gemini1').value.trim();
             const gemini2 = document.getElementById('gemini2').value.trim();
             const gemini3 = document.getElementById('gemini3').value.trim();
 
             if (!tmdb || !gemini1) {
-                alert('TMDB Key and at least one Gemini Key are required.');
+                alert("TMDB Key and at least one Gemini Key are required!");
                 return;
             }
 
-            const geminiKeys = [gemini1, gemini2, gemini3].filter(k => k);
-
+            // 2. Build Config Object
             const config = {
                 tmdb: tmdb,
-                gemini: geminiKeys
+                gemini: [gemini1, gemini2, gemini3].filter(k => k) // Remove empty keys
             };
 
+            // 3. Encode to Base64
             const jsonStr = JSON.stringify(config);
             const base64Config = btoa(jsonStr);
 
-            // Construct Stremio Install URL
-            // Protocol: stremio://HOST/CONFIG/manifest.json
-            const host = window.location.host;
-            const protocol = window.location.protocol.replace('http', 'stremio');
-            const installUrl = `${protocol}//${host}/${base64Config}/manifest.json`;
+            // 4. Construct Stremio URL
+            // Format: stremio://<domain>/<base64>/manifest.json
+            const currentHost = window.location.host;
+            const protocol = window.location.protocol === 'https:' ? 'https' : 'http'; // Stremio usually needs 'stremio://' but 'https://' works for web
 
+            // For Desktop App (stremio://), strictly using stremio scheme often triggers the app best
+            // But we can fallback to protocol relative if needed. 
+            // The prompt requested: stremio://<host>/...
+            const installUrl = `stremio://${currentHost}/${base64Config}/manifest.json`;
+
+            // 5. Trigger
+            console.log("Redirecting to:", installUrl);
             window.location.href = installUrl;
         });
     </script>
 </body>
+
 </html>
