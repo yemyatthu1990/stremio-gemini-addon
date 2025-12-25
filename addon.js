@@ -118,6 +118,48 @@ async function getTmdbItem(title, year, type) {
     }
 }
 
+async function getTmdbMeta(type, imdbId) {
+    try {
+        // 1. Resolve IMDb ID to TMDB ID
+        const findRes = await tmdb.find({ id: imdbId, external_source: 'imdb_id' });
+        // console.log(`[META] Finding TMDB ID for ${imdbId} (${type})`);
+
+        let tmdbId, item;
+
+        if (type === 'movie' && findRes.movie_results.length > 0) {
+            tmdbId = findRes.movie_results[0].id;
+            item = await tmdb.movieInfo({ id: tmdbId, append_to_response: 'credits,videos' });
+        } else if (type === 'series' && findRes.tv_results.length > 0) {
+            tmdbId = findRes.tv_results[0].id;
+            item = await tmdb.tvInfo({ id: tmdbId, append_to_response: 'credits,videos,external_ids' });
+        } else {
+            console.warn(`[META] No TMDB ID found for ${imdbId}`);
+            return null;
+        }
+
+        // 2. Map to Stremio Meta
+        const releaseYear = (item.release_date || item.first_air_date || '').split('-')[0];
+        const cast = (item.credits?.cast || []).slice(0, 10).map(c => c.name);
+        const genres = (item.genres || []).map(g => g.name);
+
+        return {
+            id: imdbId,
+            type: type,
+            name: item.title || item.name,
+            poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+            background: item.backdrop_path ? `https://image.tmdb.org/t/p/original${item.backdrop_path}` : null,
+            description: item.overview,
+            releaseInfo: releaseYear,
+            genres: genres,
+            cast: cast,
+            imdbRating: item.vote_average ? item.vote_average.toFixed(1) : undefined
+        };
+    } catch (e) {
+        console.error(`[META ERROR] Failed to fetch TMDB meta for ${imdbId}:`, e.message);
+        return null;
+    }
+}
+
 // 6. Generate Content with Model Rotation
 async function generateWithRetry(prompt) {
     for (const modelName of MODEL_POOL) {
@@ -246,38 +288,27 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 });
 
 // 8. Implement Meta Handler
+// 8. Implement Meta Handler
 builder.defineMetaHandler(async ({ type, id }) => {
-    // Basic Meta Handler reusing Model Pool logic for robustness
-    if ((type === 'movie' || type === 'series') && id.startsWith('tt')) {
-        const prompt = `${SYSTEM_INSTRUCTION} You are an API. I will give you an IMDB ID '${id}'. 
-        Return a JSON object with: 
-        - 'name'
-        - 'description' (3 sentences max)
-        - 'cast' (top 3 names)
-        - 'rating' (approximate 1-10 score)
-        If you do not strictly recognize the ID, return { 'error': 'Unknown ID' }.
-        Return strictly valid JSON.`;
+    // console.log(`[META] Request for ${type} ${id}`);
 
-        const text = await generateWithRetry(prompt);
-        if (!text) return { meta: { id, type, name: 'Error' } };
-
-        const parsed = parseGeminiResponse(text);
-        if (parsed && !parsed.error) {
-            return {
-                meta: {
-                    id: id,
-                    type: type,
-                    name: parsed.name,
-                    description: parsed.description,
-                    cast: parsed.cast,
-                    imdbRating: parsed.rating
-                }
-            };
-        } else {
-            return { meta: { id, type, name: 'Details not available' } };
-        }
+    if (!id.startsWith('tt')) {
+        return { meta: null };
     }
-    return { meta: { id, type, name: 'Unknown' } };
+
+    try {
+        const meta = await getTmdbMeta(type, id);
+        if (meta) {
+            return { meta };
+        } else {
+            // If we couldn't find it, throwing error is safer for Stremio to fallback or show error
+            // But returning null meta is also spec compliant for "not found"
+            return { meta: null };
+        }
+    } catch (e) {
+        console.error(`[META FATAL] ${e.message}`);
+        throw e;
+    }
 });
 
 module.exports = builder.getInterface();
