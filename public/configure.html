@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configure Stremio Gemini Addon</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #1e1e1e;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 2rem;
+            color: #a688fa;
+        }
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 0.75rem;
+            margin-bottom: 1.5rem;
+            background-color: #2c2c2c;
+            border: 1px solid #3d3d3d;
+            border-radius: 4px;
+            color: #fff;
+            box-sizing: border-box;
+        }
+        input:focus {
+            outline: none;
+            border-color: #a688fa;
+        }
+        button {
+            width: 100%;
+            padding: 1rem;
+            background-color: #a688fa;
+            color: #121212;
+            border: none;
+            border-radius: 4px;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #8a63e8;
+        }
+        .note {
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 1rem;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Gemini Addon Setup</h1>
+        <form id="configForm">
+            <label for="tmdb">TMDB API Key (Required)</label>
+            <input type="text" id="tmdb" name="tmdb" placeholder="Enter TMDB Read Access Token or API Key" required>
+
+            <label for="gemini1">Gemini API Key 1 (Required)</label>
+            <input type="text" id="gemini1" name="gemini1" placeholder="Enter Primary Gemini API Key" required>
+
+            <label for="gemini2">Gemini API Key 2 (Optional)</label>
+            <input type="text" id="gemini2" name="gemini2" placeholder="Backup Key (Bypass Rate Limits)">
+
+            <label for="gemini3">Gemini API Key 3 (Optional)</label>
+            <input type="text" id="gemini3" name="gemini3" placeholder="Additional Backup Key">
+
+            <button type="submit">Install Addon</button>
+        </form>
+        <p class="note">Your keys are stored only in the installation URL.</p>
+    </div>
+
+    <script>
+        document.getElementById('configForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const tmdb = document.getElementById('tmdb').value.trim();
+            const gemini1 = document.getElementById('gemini1').value.trim();
+            const gemini2 = document.getElementById('gemini2').value.trim();
+            const gemini3 = document.getElementById('gemini3').value.trim();
+
+            if (!tmdb || !gemini1) {
+                alert('TMDB Key and at least one Gemini Key are required.');
+                return;
+            }
+
+            const geminiKeys = [gemini1, gemini2, gemini3].filter(k => k);
+
+            const config = {
+                tmdb: tmdb,
+                gemini: geminiKeys
+            };
+
+            const jsonStr = JSON.stringify(config);
+            const base64Config = btoa(jsonStr);
+
+            // Construct Stremio Install URL
+            // Protocol: stremio://HOST/CONFIG/manifest.json
+            const host = window.location.host;
+            const protocol = window.location.protocol.replace('http', 'stremio');
+            const installUrl = `${protocol}//${host}/${base64Config}/manifest.json`;
+
+            window.location.href = installUrl;
+        });
+    </script>
+</body>
+</html>

@@ -3,21 +3,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { MovieDb } = require('moviedb-promise');
 require('dotenv').config();
 
-// 1. Initialize Gemini & Model Pool
-// Multi-Key Rotation Logic
-const API_KEYS = [
-    process.env.GEMINI_API_KEY,
-    process.env.GEMINI_API_KEY_2,
-    process.env.GEMINI_API_KEY_3,
-    process.env.GEMINI_API_KEY_4,
-    process.env.GEMINI_API_KEY_5
-].filter(key => !!key); // Filter out undefined keys
-
-if (API_KEYS.length === 0) {
-    console.error("No GEMINI_API_KEY found in environment variables.");
-}
-
-// Model Rotation Pool (Prioritize by Rate Limit/RPM)
+// Global Helpers & Constants (Shared across all users)
 const MODEL_POOL = [
     "gemini-flash-latest",
     "gemini-flash-lite-latest",
@@ -52,47 +38,13 @@ const MODEL_POOL = [
     "deep-research-pro-preview-12-2025"
 ];
 
-// Caching for Pagination
-const SEARCH_CACHE = new Map(); // Key: type:query, Value: { timestamp, items: [] }
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
-
-// 2. Initialize TMDB
-const tmdb = new MovieDb(process.env.TMDB_API_KEY || '');
-
-// SYSTEM INSTRUCTION
 const SYSTEM_INSTRUCTION = "You are a sophisticated movie critic and database expert. You MUST return valid, raw JSON without Markdown formatting (no ```json blocks). Never explain your choices, just return data.";
 
-// 3. Define Manifest (SEARCH ONLY)
-const manifest = {
-    id: 'com.gemini.smart.search',
-    version: '1.5.0',
-    name: 'Gemini AI Search',
-    description: "AI-powered Search for Movies & Series. Zero-idle resource usage.",
-    types: ['movie', 'series'],
-    resources: ['catalog', 'meta'],
-    catalogs: [
-        {
-            type: 'movie',
-            id: 'gemini_search',
-            name: 'AI Search: Movies',
-            extra: [
-                { name: 'search', isRequired: true, options: [] }
-            ]
-        },
-        {
-            type: 'series',
-            id: 'gemini_search',
-            name: 'AI Search: Series',
-            extra: [
-                { name: 'search', isRequired: true, options: [] }
-            ]
-        }
-    ]
-};
+// Global Cache Storage (Multi-Tenant)
+// Key: Config Hash (Token), Value: User's Search Cache Map
+const GLOBAL_USER_CACHES = new Map();
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
-const builder = new addonBuilder(manifest);
-
-// 4. Helper to parse Gemini JSON output
 function parseGeminiResponse(text) {
     try {
         let cleanedText = text.replace(/```json/g, '').replace(/```/g, '').replace(/\n/g, '').trim();
@@ -103,300 +55,274 @@ function parseGeminiResponse(text) {
     }
 }
 
-// 5. Helper function for TMDB Search
-async function getTmdbItem(title, year, type) {
-    try {
-        console.log(`[TMDB] Looking up '${title}' (Year: ${year}) Type: ${type}`);
+/**
+ * Dynamic Addon Factory
+ * @param {Object} config - { tmdb: string, gemini: string[] }
+ * @returns {Object} - Stremio Addon Interface
+ */
+function makeAddon(config) {
+    const tmdbKey = config.tmdb;
+    const apiKeys = config.gemini;
 
-        if (type === 'movie') {
-            const safeYear = year ? year.toString().substring(0, 4) : undefined;
-            var searchRes = await tmdb.searchMovie({ query: title, year: safeYear });
+    if (!tmdbKey || !apiKeys || apiKeys.length === 0) {
+        throw new Error('Invalid Configuration: Missing TMDB or Gemini Keys');
+    }
 
-            if (!searchRes.results || searchRes.results.length === 0) {
-                searchRes = await tmdb.searchMovie({ query: title });
+    // Initialize Clients for this User
+    const tmdb = new MovieDb(tmdbKey);
+
+    // Initialize Manifest
+    const manifest = {
+        id: 'com.gemini.smart.search',
+        version: '1.5.0',
+        name: 'Gemini AI Search',
+        description: "AI-powered Search for Movies & Series. Zero-idle resource usage.",
+        types: ['movie', 'series'],
+        resources: ['catalog', 'meta'],
+        catalogs: [
+            {
+                type: 'movie',
+                id: 'gemini_search',
+                name: 'AI Search: Movies',
+                extra: [
+                    { name: 'search', isRequired: true, options: [] },
+                    { name: 'skip', isRequired: false }
+                ]
+            },
+            {
+                type: 'series',
+                id: 'gemini_search',
+                name: 'AI Search: Series',
+                extra: [
+                    { name: 'search', isRequired: true, options: [] },
+                    { name: 'skip', isRequired: false }
+                ]
+            }
+        ],
+        behaviorHints: {
+            configurable: true,
+            configurationRequired: true
+        }
+    };
+
+    const builder = new addonBuilder(manifest);
+
+    // Scoped Cache for this user (based on TMDB Key as ID)
+    if (!GLOBAL_USER_CACHES.has(tmdbKey)) {
+        GLOBAL_USER_CACHES.set(tmdbKey, new Map());
+    }
+    const USER_CACHE = GLOBAL_USER_CACHES.get(tmdbKey);
+
+    // Scoped Helpers
+    async function getTmdbItem(title, year, type) {
+        try {
+            // console.log(`[TMDB] Looking up '${title}' (Year: ${year}) Type: ${type}`);
+            if (type === 'movie') {
+                const safeYear = year ? year.toString().substring(0, 4) : undefined;
+                let searchRes = await tmdb.searchMovie({ query: title, year: safeYear });
+
                 if (!searchRes.results || searchRes.results.length === 0) {
-                    console.log(`[TMDB] No results found for '${title}'`);
+                    searchRes = await tmdb.searchMovie({ query: title });
+                    if (!searchRes.results || searchRes.results.length === 0) {
+                        // console.log(`[TMDB] No results found for '${title}'`);
+                        return null;
+                    }
+                }
+
+                const item = searchRes.results[0];
+                const externalIds = await tmdb.movieExternalIds({ id: item.id });
+
+                if (!externalIds.imdb_id) return null;
+
+                return {
+                    id: externalIds.imdb_id,
+                    type: 'movie',
+                    name: item.title,
+                    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+                    description: item.overview,
+                    releaseInfo: item.release_date ? item.release_date.split('-')[0] : year,
+                    tmdbId: item.id
+                };
+            } else {
+                const searchRes = await tmdb.searchTv({ query: title });
+
+                if (!searchRes.results || searchRes.results.length === 0) {
+                    // console.log(`[TMDB] No results found for '${title}'`);
                     return null;
                 }
+
+                const item = searchRes.results[0];
+                const externalIds = await tmdb.tvExternalIds({ id: item.id });
+
+                if (!externalIds.imdb_id) return null;
+
+                return {
+                    id: externalIds.imdb_id,
+                    type: 'series',
+                    name: item.name,
+                    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+                    description: item.overview,
+                    releaseInfo: item.first_air_date ? item.first_air_date.split('-')[0] : year,
+                    tmdbId: item.id
+                };
             }
+        } catch (e) {
+            console.log(`[TMDB ERROR] ${title} (${year}) [${type}]:`, e.message);
+            return null;
+        }
+    }
 
-            const item = searchRes.results[0];
-            const externalIds = await tmdb.movieExternalIds({ id: item.id });
+    async function getTmdbMeta(type, imdbId) {
+        try {
+            const findRes = await tmdb.find({ id: imdbId, external_source: 'imdb_id' });
+            let tmdbId, item;
 
-            if (!externalIds.imdb_id) return null;
-
-            return {
-                id: externalIds.imdb_id,
-                type: 'movie',
-                name: item.title,
-                poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-                description: item.overview,
-                releaseInfo: item.release_date ? item.release_date.split('-')[0] : year,
-                tmdbId: item.id
-            };
-        } else {
-            // RELAXED SEARCH: Do NOT filter by year for Series (AI often gets ranges wrong)
-            const searchRes = await tmdb.searchTv({ query: title });
-
-            if (!searchRes.results || searchRes.results.length === 0) {
-                console.log(`[TMDB] No results found for '${title}'`);
+            if (type === 'movie' && findRes.movie_results.length > 0) {
+                tmdbId = findRes.movie_results[0].id;
+                item = await tmdb.movieInfo({ id: tmdbId, append_to_response: 'credits,videos' });
+            } else if (type === 'series' && findRes.tv_results.length > 0) {
+                tmdbId = findRes.tv_results[0].id;
+                item = await tmdb.tvInfo({ id: tmdbId, append_to_response: 'credits,videos,external_ids' });
+            } else {
                 return null;
             }
 
-            const item = searchRes.results[0];
-            const externalIds = await tmdb.tvExternalIds({ id: item.id });
-
-            if (!externalIds.imdb_id) return null;
+            const releaseYear = (item.release_date || item.first_air_date || '').split('-')[0];
+            const cast = (item.credits?.cast || []).slice(0, 10).map(c => c.name);
+            const genres = (item.genres || []).map(g => g.name);
 
             return {
-                id: externalIds.imdb_id,
-                type: 'series',
-                name: item.name,
+                id: imdbId,
+                type: type,
+                name: item.title || item.name,
                 poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+                background: item.backdrop_path ? `https://image.tmdb.org/t/p/original${item.backdrop_path}` : null,
                 description: item.overview,
-                releaseInfo: item.first_air_date ? item.first_air_date.split('-')[0] : year,
-                tmdbId: item.id
+                releaseInfo: releaseYear,
+                genres: genres,
+                cast: cast,
+                imdbRating: item.vote_average ? item.vote_average.toFixed(1) : undefined
             };
-        }
-    } catch (e) {
-        console.log(`[TMDB ERROR] ${title} (${year}) [${type}]:`, e.message);
-        return null;
-    }
-}
-
-async function getTmdbMeta(type, imdbId) {
-    try {
-        // 1. Resolve IMDb ID to TMDB ID
-        const findRes = await tmdb.find({ id: imdbId, external_source: 'imdb_id' });
-        // console.log(`[META] Finding TMDB ID for ${imdbId} (${type})`);
-
-        let tmdbId, item;
-
-        if (type === 'movie' && findRes.movie_results.length > 0) {
-            tmdbId = findRes.movie_results[0].id;
-            item = await tmdb.movieInfo({ id: tmdbId, append_to_response: 'credits,videos' });
-        } else if (type === 'series' && findRes.tv_results.length > 0) {
-            tmdbId = findRes.tv_results[0].id;
-            item = await tmdb.tvInfo({ id: tmdbId, append_to_response: 'credits,videos,external_ids' });
-        } else {
-            console.warn(`[META] No TMDB ID found for ${imdbId}`);
+        } catch (e) {
+            console.error(`[META ERROR] Failed to fetch TMDB meta source for ${imdbId}:`, e.message);
             return null;
         }
-
-        // 2. Map to Stremio Meta
-        const releaseYear = (item.release_date || item.first_air_date || '').split('-')[0];
-        const cast = (item.credits?.cast || []).slice(0, 10).map(c => c.name);
-        const genres = (item.genres || []).map(g => g.name);
-
-        return {
-            id: imdbId,
-            type: type,
-            name: item.title || item.name,
-            poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-            background: item.backdrop_path ? `https://image.tmdb.org/t/p/original${item.backdrop_path}` : null,
-            description: item.overview,
-            releaseInfo: releaseYear,
-            genres: genres,
-            cast: cast,
-            imdbRating: item.vote_average ? item.vote_average.toFixed(1) : undefined
-        };
-    } catch (e) {
-        console.error(`[META ERROR] Failed to fetch TMDB meta for ${imdbId}:`, e.message);
-        return null;
     }
-}
 
-// 6. Generate Content with Model Rotation
-async function generateWithRetry(prompt) {
-    for (const modelName of MODEL_POOL) {
-        // Inner Loop: Key Rotation
-        for (const apiKey of API_KEYS) {
-            try {
-                // Initialize client with specific key for this attempt
-                const genAI = new GoogleGenerativeAI(apiKey);
-                const model = genAI.getGenerativeModel({ model: modelName });
-
-                console.log(`[GEMINI] Attempting generation with model: ${modelName} (Key ending: ...${apiKey.slice(-4)})`);
-
-                const result = await model.generateContent(prompt);
-                const response = await result.response;
-                const text = response.text();
-
-                // If successful, return text
-                console.log(`[GEMINI] Success (${modelName})`);
-                return text;
-
-            } catch (error) {
-                const isQuotaError = error.message.includes('429') || error.message.includes('Quota') || error.message.includes('Too Many Requests');
-
-                if (isQuotaError) {
-                    console.warn(`[LIMIT] Key ending in ...${apiKey.slice(-4)} exhausted on ${modelName}. Switching Key...`);
-                    continue; // Try next Key
-                } else {
-                    console.error(`[GEMINI ERROR] ${modelName} failed with non-quota error:`, error.message);
-                    // For non-quota errors, we might still want to try the next key or model, 
-                    // dependent on if it's a prompt issue or a service issue. 
-                    // For resilience, we continue to the next key.
-                    continue;
+    async function generateWithRetry(prompt) {
+        for (const modelName of MODEL_POOL) {
+            for (const apiKey of apiKeys) {
+                try {
+                    const genAI = new GoogleGenerativeAI(apiKey);
+                    const model = genAI.getGenerativeModel({ model: modelName });
+                    // console.log(`[GEMINI] Attempting ${modelName} with key ...${apiKey.slice(-4)}`);
+                    const result = await model.generateContent(prompt);
+                    const response = await result.response;
+                    const text = response.text();
+                    // console.log(`[GEMINI] Success (${modelName})`);
+                    return text;
+                } catch (error) {
+                    const isQuotaError = error.message.includes('429') || error.message.includes('Quota') || error.message.includes('Too Many Requests');
+                    if (isQuotaError) {
+                        console.warn(`[LIMIT] Key ...${apiKey.slice(-4)} exhausted on ${modelName}. Switching...`);
+                        continue;
+                    } else {
+                        // console.error(`[GEMINI ERROR] ${modelName} / ...${apiKey.slice(-4)}: ${error.message}`);
+                        continue;
+                    }
                 }
             }
         }
-        console.warn(`[MODEL FAILED] ${modelName} exhausted on all keys. Switching Model...`);
+        console.error("[FATAL] All models/keys exhausted.");
+        return null;
     }
 
-    console.error("[FATAL] All models in pool exhausted on all keys.");
-    return null;
-}
+    // --- Handlers ---
 
-// 7. Implement Catalog Handler (SEARCH ONLY)
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
-    console.log(`[CATALOG] Request:`, { type, id, extra });
+    builder.defineCatalogHandler(async ({ type, id, extra }) => {
+        // console.log(`[CATALOG] Request:`, { type, id, extra });
+        if (!extra || !extra.search) throw new Error('No search query provided');
 
-    if (!extra || !extra.search) {
-        throw new Error('No search query provided');
-    }
+        let cleanQuery = extra.search;
+        if (cleanQuery.includes('.json')) cleanQuery = cleanQuery.split('.json')[0];
+        extra.search = cleanQuery;
 
-    // CLEAN THE INPUT: Remove .json extensions and URL parameters Stremio might append
-    let cleanQuery = extra.search;
-    if (cleanQuery.includes('.json')) {
-        cleanQuery = cleanQuery.split('.json')[0];
-    }
-    // Update the extra object so the rest of the logic uses the clean version
-    extra.search = cleanQuery;
+        const query = extra.search.toLowerCase();
+        const itemLabel = type === 'movie' ? 'movies' : 'TV shows';
+        const skip = extra.skip ? parseInt(extra.skip) : 0;
+        const PAGE_SIZE = 20;
 
-    const query = extra.search.toLowerCase();
-    const itemLabel = type === 'movie' ? 'movies' : 'TV shows';
-    const skip = extra.skip ? parseInt(extra.skip) : 0;
-    const PAGE_SIZE = 20;
+        // Optimization
+        const movieKeywords = ['movie', 'film', 'cinema'];
+        const seriesKeywords = ['series', 'show', 'tv', 'season', 'episode'];
+        const wantsMovies = movieKeywords.some(w => query.includes(w));
+        const wantsSeries = seriesKeywords.some(w => query.includes(w));
 
-    // SMART FILTER: Optimization
-    const movieKeywords = ['movie', 'film', 'cinema'];
-    const seriesKeywords = ['series', 'show', 'tv', 'season', 'episode'];
+        if (wantsMovies && !wantsSeries && type === 'series') return { metas: [] };
+        if (wantsSeries && !wantsMovies && type === 'movie') return { metas: [] };
 
-    const wantsMovies = movieKeywords.some(w => query.includes(w));
-    const wantsSeries = seriesKeywords.some(w => query.includes(w));
-    console.log(`[OPTIMIZATION] wantsMovies: ${wantsMovies}, wantsSeries: ${wantsSeries}`);
-    // Block logic
-    if (wantsMovies && !wantsSeries && type === 'series') {
-        console.log(`[OPTIMIZATION] Skipping Series request for movie-focused query: "${extra.search}"`);
-        return {
-            metas: []
-        };
-    }
-    if (wantsSeries && !wantsMovies && type === 'movie') {
-        console.log(`[OPTIMIZATION] Skipping Movie request for series-focused query: "${extra.search}"`);
-        return {
-            metas: []
-        };
-    }
+        // Cache Logic
+        const cacheKey = `${type}:${query}`;
+        let cachedList = [];
 
-    // CACHE CHECK
-    const cacheKey = `${type}:${query}`;
-    let cachedList = [];
-
-    if (SEARCH_CACHE.has(cacheKey)) {
-        const cached = SEARCH_CACHE.get(cacheKey);
-        const now = Date.now();
-        if (now - cached.timestamp < CACHE_TTL) {
-            console.log(`[CACHE HIT] Using cached results for '${query}' (${type})`);
-            cachedList = cached.items;
-        } else {
-            console.log(`[CACHE EXPIRED] Removing old results for '${query}'`);
-            SEARCH_CACHE.delete(cacheKey);
-        }
-    }
-
-    // GEMINI FETCH (If Cache Miss)
-    if (cachedList.length === 0) {
-        // Prepare Prompt
-        console.log(`[GEMINI] Processing search query: ${extra.search} for type: ${type}`);
-        const prompt = `${SYSTEM_INSTRUCTION} 
-        The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
-        If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
-        If it is a plot description, find the closest matches. 
-        Provide a comprehensive list of **20** recommendations. Prioritize relevance but ensure variety.
-        Return a strictly valid JSON array of objects with "title" and "year".
-        Limit to 20 items.
-        Example: [{"title": "Interstellar", "year": "2014"}]`;
-
-        // Execute with Retry
-        const text = await generateWithRetry(prompt);
-
-        if (!text) {
-            return { metas: [] }; // Fail gracefully (or throw if preferred, returning empty array stops pagination)
+        if (USER_CACHE.has(cacheKey)) {
+            const cached = USER_CACHE.get(cacheKey);
+            if (Date.now() - cached.timestamp < CACHE_TTL) {
+                console.log(`[CACHE HIT] Using cached results for '${query}' (${type})`);
+                cachedList = cached.items;
+            } else {
+                USER_CACHE.delete(cacheKey);
+            }
         }
 
-        const suggestions = parseGeminiResponse(text);
+        if (cachedList.length === 0) {
+            console.log(`[GEMINI] Processing search query: ${extra.search} for type: ${type}`);
+            const prompt = `${SYSTEM_INSTRUCTION} 
+            The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
+            If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
+            If it is a plot description, find the closest matches. 
+            Provide a comprehensive list of **20** recommendations. Prioritize relevance but ensure variety.
+            Return a strictly valid JSON array of objects with "title" and "year".
+            Limit to 20 items.
+            Example: [{"title": "Interstellar", "year": "2014"}]`;
 
-        if (!Array.isArray(suggestions) || suggestions.length === 0) {
-            return { metas: [] };
+            const text = await generateWithRetry(prompt);
+            if (!text) return { metas: [] };
+
+            const suggestions = parseGeminiResponse(text);
+            if (!Array.isArray(suggestions) || suggestions.length === 0) return { metas: [] };
+
+            console.log(`[GEMINI] Generated ${suggestions.length} items. Caching...`);
+            cachedList = suggestions;
+            USER_CACHE.set(cacheKey, { timestamp: Date.now(), items: cachedList });
         }
 
-        console.log(`[GEMINI] Generated ${suggestions.length} items. Caching...`);
-        cachedList = suggestions;
-        SEARCH_CACHE.set(cacheKey, { timestamp: Date.now(), items: cachedList });
-    }
+        if (skip >= cachedList.length) return { metas: [] };
 
-    // PAGINATION SLICE
-    // If skip >= length, we are done
-    if (skip >= cachedList.length) {
-        console.log(`[PAGINATION] End of list (Skip: ${skip}, Total: ${cachedList.length})`);
-        return { metas: [] };
-    }
+        const pageItems = cachedList.slice(skip, skip + PAGE_SIZE);
+        // console.log(`[PAGINATION] Resolving items ${skip} to ${skip + PAGE_SIZE}`);
 
-    const pageItems = cachedList.slice(skip, skip + PAGE_SIZE);
-    console.log(`[PAGINATION] Resolving items ${skip} to ${skip + PAGE_SIZE} (Total: ${cachedList.length})`);
+        const metaPromises = pageItems.map(async (item) => {
+            return await getTmdbItem(item.title, item.year, type);
+        });
 
-    if (!process.env.TMDB_API_KEY) {
-        console.error("TMDB_API_KEY is missing.");
-        throw new Error('Configuration Error: TMDB_API_KEY missing');
-    }
+        const metas = (await Promise.all(metaPromises)).filter(m => m !== null);
+        if (!metas || metas.length === 0) return { metas: [] };
+        return { metas: metas };
+    });
 
-    // Resolve TMDB (Only for current page)
-    const metaPromises = pageItems.map(async (item) => {
-        const filledItem = await getTmdbItem(item.title, item.year, type);
-        if (filledItem) {
-            // console.log(`[MATCH] Found: ${filledItem.name}`);
-            return filledItem;
-        } else {
-            // console.log(`[MISS] ${item.title}`);
-            return null;
+    builder.defineMetaHandler(async ({ type, id }) => {
+        if (!id.startsWith('tt')) return { meta: null };
+        try {
+            const meta = await getTmdbMeta(type, id);
+            return { meta: meta || null };
+        } catch (e) {
+            console.error(`[META FATAL] ${e.message}`);
+            throw e;
         }
     });
 
-    const metas = (await Promise.all(metaPromises)).filter(m => m !== null);
+    return builder.getInterface();
+}
 
-    if (!metas || metas.length === 0) {
-        // If a whole page fails to resolve, we might want to throw or return empty. 
-        // Returning empty stops Stremio's pagination.
-        return { metas: [] };
-    }
-
-    return { metas: metas };
-});
-
-// 8. Implement Meta Handler
-// 8. Implement Meta Handler
-builder.defineMetaHandler(async ({ type, id }) => {
-    // console.log(`[META] Request for ${type} ${id}`);
-
-    if (!id.startsWith('tt')) {
-        return { meta: null };
-    }
-
-    try {
-        const meta = await getTmdbMeta(type, id);
-        if (meta) {
-            return { meta };
-        } else {
-            // If we couldn't find it, throwing error is safer for Stremio to fallback or show error
-            // But returning null meta is also spec compliant for "not found"
-            return { meta: null };
-        }
-    } catch (e) {
-        console.error(`[META FATAL] ${e.message}`);
-        throw e;
-    }
-});
-
-module.exports = builder.getInterface();
+module.exports = makeAddon;
