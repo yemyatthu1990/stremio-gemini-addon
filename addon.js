@@ -61,11 +61,26 @@ function parseGeminiResponse(text) {
  * @returns {Object} - Stremio Addon Interface
  */
 function makeAddon(config) {
-    const tmdbKey = config.tmdb;
-    const apiKeys = config.gemini;
+    const tmdbKey = config && config.tmdb;
+    const apiKeys = config && config.gemini;
 
+    // SKELETON MANIFEST (Fallback for Unconfigured State)
     if (!tmdbKey || !apiKeys || apiKeys.length === 0) {
-        throw new Error('Invalid Configuration: Missing TMDB or Gemini Keys');
+        const skeletonManifest = {
+            id: 'com.gemini.smart.search',
+            version: '1.5.0',
+            name: 'Gemini AI Search (Configure Me)',
+            description: "Please configure this addon with your API keys to enable AI search.",
+            types: ['movie', 'series'],
+            resources: [], // No resources offered until configured
+            catalogs: [], // No catalogs offered until configured
+            behaviorHints: {
+                configurable: true,
+                configurationRequired: true
+            }
+        };
+        const skeletonBuilder = new addonBuilder(skeletonManifest);
+        return skeletonBuilder.getInterface();
     }
 
     // Initialize Clients for this User

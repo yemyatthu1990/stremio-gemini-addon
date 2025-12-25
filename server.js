@@ -19,6 +19,15 @@ app.get('/configure', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'configure.html'));
 });
 
+// Handle "Bare" Install Link (No config yet)
+app.get('/manifest.json', (req, res) => {
+    const addonInterface = makeAddon({}); // Pass empty config
+    const router = getRouter(addonInterface);
+    router(req, res, () => {
+        res.end();
+    });
+});
+
 // Dynamic Addon Route
 // Stremio will call /:config/manifest.json, /:config/catalog/..., etc.
 app.use('/:config', (req, res, next) => {
