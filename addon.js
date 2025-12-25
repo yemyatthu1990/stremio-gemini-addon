@@ -4,14 +4,57 @@ const { MovieDb } = require('moviedb-promise');
 require('dotenv').config();
 
 // 1. Initialize Gemini & Model Pool
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+// Multi-Key Rotation Logic
+const API_KEYS = [
+    process.env.GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3,
+    process.env.GEMINI_API_KEY_4,
+    process.env.GEMINI_API_KEY_5
+].filter(key => !!key); // Filter out undefined keys
+
+if (API_KEYS.length === 0) {
+    console.error("No GEMINI_API_KEY found in environment variables.");
+}
 
 // Model Rotation Pool (Prioritize by Rate Limit/RPM)
 const MODEL_POOL = [
-    "gemini-2.5-flash-lite", // High RPM
-    "gemini-2.5-flash",           // Medium RPM
-    "gemini-3-flash"            // Fallback
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-pro-latest",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-image-preview",
+    "gemini-2.5-flash-image",
+    "gemini-2.5-flash-preview-09-2025",
+    "gemini-2.5-flash-lite-preview-09-2025",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-2.0-flash-exp",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-2.0-flash-lite-001",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-lite-preview-02-05",
+    "gemini-2.0-flash-lite-preview",
+    "gemini-exp-1206",
+    "gemini-2.5-flash-preview-tts",
+    "gemini-2.5-pro-preview-tts",
+    "gemma-3-1b-it",
+    "gemma-3-4b-it",
+    "gemma-3-12b-it",
+    "gemma-3-27b-it",
+    "gemma-3n-e4b-it",
+    "gemma-3n-e2b-it",
+    "gemini-robotics-er-1.5-preview",
+    "gemini-2.5-computer-use-preview-10-2025",
+    "deep-research-pro-preview-12-2025"
 ];
+
+// Caching for Pagination
+const SEARCH_CACHE = new Map(); // Key: type:query, Value: { timestamp, items: [] }
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 // 2. Initialize TMDB
 const tmdb = new MovieDb(process.env.TMDB_API_KEY || '');
@@ -67,11 +110,14 @@ async function getTmdbItem(title, year, type) {
 
         if (type === 'movie') {
             const safeYear = year ? year.toString().substring(0, 4) : undefined;
-            const searchRes = await tmdb.searchMovie({ query: title, year: safeYear });
+            var searchRes = await tmdb.searchMovie({ query: title, year: safeYear });
 
             if (!searchRes.results || searchRes.results.length === 0) {
-                console.log(`[TMDB] No results found for '${title}'`);
-                return null;
+                searchRes = await tmdb.searchMovie({ query: title });
+                if (!searchRes.results || searchRes.results.length === 0) {
+                    console.log(`[TMDB] No results found for '${title}'`);
+                    return null;
+                }
             }
 
             const item = searchRes.results[0];
@@ -163,32 +209,42 @@ async function getTmdbMeta(type, imdbId) {
 // 6. Generate Content with Model Rotation
 async function generateWithRetry(prompt) {
     for (const modelName of MODEL_POOL) {
-        try {
-            // console.log(`[GEMINI] Attempting generation with model: ${modelName}`);
-            const model = genAI.getGenerativeModel({ model: modelName });
-            const result = await model.generateContent(prompt);
-            const response = await result.response;
-            const text = response.text();
+        // Inner Loop: Key Rotation
+        for (const apiKey of API_KEYS) {
+            try {
+                // Initialize client with specific key for this attempt
+                const genAI = new GoogleGenerativeAI(apiKey);
+                const model = genAI.getGenerativeModel({ model: modelName });
 
-            // If successful, return text
-            console.log(`[GEMINI] Success (${modelName})`);
-            return text;
+                console.log(`[GEMINI] Attempting generation with model: ${modelName} (Key ending: ...${apiKey.slice(-4)})`);
 
-        } catch (error) {
-            const isQuotaError = error.message.includes('429') || error.message.includes('Quota') || error.message.includes('Too Many Requests');
+                const result = await model.generateContent(prompt);
+                const response = await result.response;
+                const text = response.text();
 
-            if (isQuotaError) {
-                console.warn(`[LIMIT] Model ${modelName} exhausted/rate-limited. Switching...`);
-                continue; // Try next model
-            } else {
-                console.error(`[GEMINI ERROR] ${modelName} failed with non-quota error:`, error.message);
-                // For critical errors, maybe still try next model? For now, continue safer.
-                continue;
+                // If successful, return text
+                console.log(`[GEMINI] Success (${modelName})`);
+                return text;
+
+            } catch (error) {
+                const isQuotaError = error.message.includes('429') || error.message.includes('Quota') || error.message.includes('Too Many Requests');
+
+                if (isQuotaError) {
+                    console.warn(`[LIMIT] Key ending in ...${apiKey.slice(-4)} exhausted on ${modelName}. Switching Key...`);
+                    continue; // Try next Key
+                } else {
+                    console.error(`[GEMINI ERROR] ${modelName} failed with non-quota error:`, error.message);
+                    // For non-quota errors, we might still want to try the next key or model, 
+                    // dependent on if it's a prompt issue or a service issue. 
+                    // For resilience, we continue to the next key.
+                    continue;
+                }
             }
         }
+        console.warn(`[MODEL FAILED] ${modelName} exhausted on all keys. Switching Model...`);
     }
 
-    console.error("[FATAL] All models in pool exhausted or failed.");
+    console.error("[FATAL] All models in pool exhausted on all keys.");
     return null;
 }
 
@@ -210,6 +266,8 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
     const query = extra.search.toLowerCase();
     const itemLabel = type === 'movie' ? 'movies' : 'TV shows';
+    const skip = extra.skip ? parseInt(extra.skip) : 0;
+    const PAGE_SIZE = 20;
 
     // SMART FILTER: Optimization
     const movieKeywords = ['movie', 'film', 'cinema'];
@@ -232,46 +290,76 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
         };
     }
 
-    // Prepare Prompt
-    console.log(`Processing search query: ${extra.search} for type: ${type}`);
-    const prompt = `${SYSTEM_INSTRUCTION} 
-    The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
-    If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
-    If it is a plot description, find the closest matches. 
-    Return 10 ${itemLabel}.
-    Return a strictly valid JSON array of objects with "title" and "year".
-    Example: [{"title": "Interstellar", "year": "2014"}]`;
+    // CACHE CHECK
+    const cacheKey = `${type}:${query}`;
+    let cachedList = [];
 
-    // Execute with Retry
-    const text = await generateWithRetry(prompt);
-
-    if (!text) {
-        return {
-            metas: []
-        };
+    if (SEARCH_CACHE.has(cacheKey)) {
+        const cached = SEARCH_CACHE.get(cacheKey);
+        const now = Date.now();
+        if (now - cached.timestamp < CACHE_TTL) {
+            console.log(`[CACHE HIT] Using cached results for '${query}' (${type})`);
+            cachedList = cached.items;
+        } else {
+            console.log(`[CACHE EXPIRED] Removing old results for '${query}'`);
+            SEARCH_CACHE.delete(cacheKey);
+        }
     }
 
-    const suggestions = parseGeminiResponse(text);
+    // GEMINI FETCH (If Cache Miss)
+    if (cachedList.length === 0) {
+        // Prepare Prompt
+        console.log(`[GEMINI] Processing search query: ${extra.search} for type: ${type}`);
+        const prompt = `${SYSTEM_INSTRUCTION} 
+        The user is searching for **${itemLabel}**. Use the query "${extra.search}" as a semantic guide.
+        If it is a mood (e.g., 'sad sci-fi'), find ${itemLabel} that match the atmosphere. 
+        If it is a plot description, find the closest matches. 
+        Provide a comprehensive list of **20** recommendations. Prioritize relevance but ensure variety.
+        Return a strictly valid JSON array of objects with "title" and "year".
+        Limit to 20 items.
+        Example: [{"title": "Interstellar", "year": "2014"}]`;
 
-    if (!Array.isArray(suggestions)) {
-        return {
-            metas: []
-        };
+        // Execute with Retry
+        const text = await generateWithRetry(prompt);
+
+        if (!text) {
+            return { metas: [] }; // Fail gracefully (or throw if preferred, returning empty array stops pagination)
+        }
+
+        const suggestions = parseGeminiResponse(text);
+
+        if (!Array.isArray(suggestions) || suggestions.length === 0) {
+            return { metas: [] };
+        }
+
+        console.log(`[GEMINI] Generated ${suggestions.length} items. Caching...`);
+        cachedList = suggestions;
+        SEARCH_CACHE.set(cacheKey, { timestamp: Date.now(), items: cachedList });
     }
+
+    // PAGINATION SLICE
+    // If skip >= length, we are done
+    if (skip >= cachedList.length) {
+        console.log(`[PAGINATION] End of list (Skip: ${skip}, Total: ${cachedList.length})`);
+        return { metas: [] };
+    }
+
+    const pageItems = cachedList.slice(skip, skip + PAGE_SIZE);
+    console.log(`[PAGINATION] Resolving items ${skip} to ${skip + PAGE_SIZE} (Total: ${cachedList.length})`);
 
     if (!process.env.TMDB_API_KEY) {
         console.error("TMDB_API_KEY is missing.");
         throw new Error('Configuration Error: TMDB_API_KEY missing');
     }
 
-    // Resolve TMDB
-    const metaPromises = suggestions.map(async (item) => {
+    // Resolve TMDB (Only for current page)
+    const metaPromises = pageItems.map(async (item) => {
         const filledItem = await getTmdbItem(item.title, item.year, type);
         if (filledItem) {
-            console.log(`[MATCH] Gemini suggested "${item.title} (${item.year})" -> Found TMDB ID: ${filledItem.tmdbId}`);
+            // console.log(`[MATCH] Found: ${filledItem.name}`);
             return filledItem;
         } else {
-            console.log(`[MISS] Could not resolve "${item.title} (${item.year})"`);
+            // console.log(`[MISS] ${item.title}`);
             return null;
         }
     });
@@ -279,9 +367,9 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     const metas = (await Promise.all(metaPromises)).filter(m => m !== null);
 
     if (!metas || metas.length === 0) {
-        return {
-            metas: []
-        };
+        // If a whole page fails to resolve, we might want to throw or return empty. 
+        // Returning empty stops Stremio's pagination.
+        return { metas: [] };
     }
 
     return { metas: metas };
