@@ -22,7 +22,7 @@ const SYSTEM_INSTRUCTION = "You are a sophisticated movie critic and database ex
 // 3. Define Manifest (SEARCH ONLY)
 const manifest = {
     id: 'com.gemini.smart.search',
-    version: '1.3.0',
+    version: '1.5.0',
     name: 'Gemini AI Search',
     description: "AI-powered Search for Movies & Series. Zero-idle resource usage.",
     types: ['movie', 'series'],
@@ -32,13 +32,17 @@ const manifest = {
             type: 'movie',
             id: 'gemini_search',
             name: 'AI Search: Movies',
-            extra: [{ name: 'search', isRequired: true }]
+            extra: [
+                { name: 'search', isRequired: true, options: [] }
+            ]
         },
         {
             type: 'series',
             id: 'gemini_search',
             name: 'AI Search: Series',
-            extra: [{ name: 'search', isRequired: true }]
+            extra: [
+                { name: 'search', isRequired: true, options: [] }
+            ]
         }
     ]
 };
@@ -150,10 +154,17 @@ async function generateWithRetry(prompt) {
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     console.log(`[CATALOG] Request:`, { type, id, extra });
 
-    // STRICT VALIDATION: Search Only
     if (!extra || !extra.search) {
-        return { metas: [] };
+        throw new Error('No search query provided');
     }
+
+    // CLEAN THE INPUT: Remove .json extensions and URL parameters Stremio might append
+    let cleanQuery = extra.search;
+    if (cleanQuery.includes('.json')) {
+        cleanQuery = cleanQuery.split('.json')[0];
+    }
+    // Update the extra object so the rest of the logic uses the clean version
+    extra.search = cleanQuery;
 
     const query = extra.search.toLowerCase();
     const itemLabel = type === 'movie' ? 'movies' : 'TV shows';
@@ -164,15 +175,19 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
     const wantsMovies = movieKeywords.some(w => query.includes(w));
     const wantsSeries = seriesKeywords.some(w => query.includes(w));
-
+    console.log(`[OPTIMIZATION] wantsMovies: ${wantsMovies}, wantsSeries: ${wantsSeries}`);
     // Block logic
     if (wantsMovies && !wantsSeries && type === 'series') {
         console.log(`[OPTIMIZATION] Skipping Series request for movie-focused query: "${extra.search}"`);
-        return { metas: [] };
+        return {
+            metas: []
+        };
     }
     if (wantsSeries && !wantsMovies && type === 'movie') {
         console.log(`[OPTIMIZATION] Skipping Movie request for series-focused query: "${extra.search}"`);
-        return { metas: [] };
+        return {
+            metas: []
+        };
     }
 
     // Prepare Prompt
@@ -188,17 +203,23 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     // Execute with Retry
     const text = await generateWithRetry(prompt);
 
-    if (!text) return { metas: [] };
+    if (!text) {
+        return {
+            metas: []
+        };
+    }
 
     const suggestions = parseGeminiResponse(text);
 
     if (!Array.isArray(suggestions)) {
-        return { metas: [] };
+        return {
+            metas: []
+        };
     }
 
     if (!process.env.TMDB_API_KEY) {
         console.error("TMDB_API_KEY is missing.");
-        return { metas: [] };
+        throw new Error('Configuration Error: TMDB_API_KEY missing');
     }
 
     // Resolve TMDB
@@ -214,6 +235,13 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     });
 
     const metas = (await Promise.all(metaPromises)).filter(m => m !== null);
+
+    if (!metas || metas.length === 0) {
+        return {
+            metas: []
+        };
+    }
+
     return { metas: metas };
 });
 

@@ -1,14 +1,13 @@
-const { getRouter } = require("stremio-addon-sdk");
-const addonInterface = require("../addon");
+const addonInterface = require('../addon');
+const { getRouter } = require('stremio-addon-sdk');
 
 const router = getRouter(addonInterface);
 
-module.exports = function (req, res) {
-    // Vercel serverless request handler
-    router(req, res, function (err) {
+module.exports = (req, res) => {
+    router(req, res, (err) => {
         if (err) {
             console.error(err);
-            res.status(500).send({ error: "Internal Server Error", details: err.message });
+            res.status(500).send('Internal Server Error');
         }
     });
 };
